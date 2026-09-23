@@ -155,7 +155,7 @@ private struct CreditsFooter: View {
             Text("by")
                 .font(.system(size: 11, weight: .regular, design: .rounded))
                 .foregroundStyle(CafeTheme.inkMuted)
-            Link("mainlab.es", destination: URL(string: "https://mainlab.es")!)
+            Link("mainlab.es/apps", destination: URL(string: "https://mainlab.es/apps/")!)
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                 .foregroundStyle(CafeTheme.glow)
         }
@@ -194,10 +194,10 @@ private struct AboutSheetView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(CafeTheme.inkMuted)
 
-                Link(destination: URL(string: "https://mainlab.es")!) {
+                Link(destination: URL(string: "https://mainlab.es/apps/")!) {
                     HStack(spacing: 4) {
-                        Text("mainlab.es")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                        Text("mainlab.es/apps")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
                             .foregroundStyle(CafeTheme.glow)
                         Image(systemName: "arrow.up.right")
                             .font(.system(size: 10, weight: .bold))
