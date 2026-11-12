@@ -54,7 +54,8 @@ private struct SetupSessionView: View {
             CoffeeCupView(
                 fill: CGFloat(appState.fillLevel),
                 smoke: appState.shouldShowSmoke,
-                active: false
+                active: false,
+                paused: !appState.isWindowVisible
             )
             .frame(height: 268)
             .padding(.top, 12)
@@ -102,7 +103,10 @@ private struct ActiveSessionView: View {
             CoffeeCupView(
                 fill: CGFloat(appState.fillLevel),
                 smoke: appState.shouldShowSmoke,
-                active: true
+                active: true,
+                sessionEnd: appState.endDate,
+                sessionLength: appState.totalSeconds,
+                paused: !appState.isWindowVisible
             )
             .frame(height: 300)
             .animation(.easeInOut(duration: 0.8), value: appState.shouldShowSmoke)

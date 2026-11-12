@@ -4,18 +4,31 @@ struct CoffeeCupView: View {
     var fill: CGFloat
     var smoke: Bool
     var active: Bool
+    /// End of a timed session and its length. When set, the liquid level is derived
+    /// from the clock on every frame, so it drains smoothly without the app state
+    /// having to publish a new value for each frame.
+    var sessionEnd: Date? = nil
+    var sessionLength: TimeInterval = 0
+    /// Stops the per-frame redraw entirely (window hidden or covered).
+    var paused: Bool = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: paused)) { timeline in
             let time = timeline.date.timeIntervalSinceReferenceDate
+            let level = liveFill(at: timeline.date)
             Canvas { context, size in
-                draw(context: context, size: size, time: time)
+                draw(context: context, size: size, time: time, fill: level)
             }
         }
         .accessibilityHidden(true)
     }
 
-    private func draw(context: GraphicsContext, size: CGSize, time: TimeInterval) {
+    private func liveFill(at date: Date) -> CGFloat {
+        guard let sessionEnd, sessionLength > 0 else { return fill }
+        return CGFloat(max(0, min(1, sessionEnd.timeIntervalSince(date) / sessionLength)))
+    }
+
+    private func draw(context: GraphicsContext, size: CGSize, time: TimeInterval, fill: CGFloat) {
         let cup = cupRect(in: size)
         drawContactShadow(context: context, cup: cup)
         if smoke || active {
@@ -23,7 +36,7 @@ struct CoffeeCupView: View {
         }
         drawHandle(context: context, cup: cup)
         drawBody(context: context, cup: cup)
-        drawLiquid(context: context, cup: cup, time: time)
+        drawLiquid(context: context, cup: cup, time: time, fill: fill)
         drawRim(context: context, cup: cup)
         drawSpecular(context: context, cup: cup)
         drawSmoke(context: context, cup: cup, time: time)
@@ -177,7 +190,7 @@ struct CoffeeCupView: View {
         )
     }
 
-    private func drawLiquid(context: GraphicsContext, cup: CGRect, time: TimeInterval) {
+    private func drawLiquid(context: GraphicsContext, cup: CGRect, time: TimeInterval, fill: CGFloat) {
         let cavity = innerPath(in: cup)
         let bounds = cavity.boundingRect
         let fill = max(0, min(1, fill))

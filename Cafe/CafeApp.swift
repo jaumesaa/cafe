@@ -10,7 +10,7 @@ struct CafeApp: App {
         Window("cafe", id: "main") {
             ContentView()
                 .environmentObject(appState)
-                .background(WindowConfigurator())
+                .background(WindowConfigurator(appState: appState))
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
@@ -68,16 +68,25 @@ final class CafeAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 private struct WindowConfigurator: NSViewRepresentable {
+    let appState: AppState
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(appState: appState)
+    }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
+        let coordinator = context.coordinator
         DispatchQueue.main.async {
             configure(view.window)
+            coordinator.track(view.window)
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         configure(nsView.window)
+        context.coordinator.track(nsView.window)
     }
 
     private func configure(_ window: NSWindow?) {
@@ -89,5 +98,47 @@ private struct WindowConfigurator: NSViewRepresentable {
         window.isOpaque = false
         window.styleMask.insert(.fullSizeContentView)
         window.toolbarStyle = .unifiedCompact
+    }
+
+    /// Mirrors the window's on-screen visibility into `AppState.isWindowVisible`, so the
+    /// cup stops rendering while the window is ordered out (menu-bar mode) or covered.
+    @MainActor
+    final class Coordinator {
+        private let appState: AppState
+        private weak var window: NSWindow?
+        private var observer: NSObjectProtocol?
+
+        init(appState: AppState) {
+            self.appState = appState
+        }
+
+        func track(_ window: NSWindow?) {
+            guard let window, window !== self.window else { return }
+            if let observer {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            self.window = window
+            observer = NotificationCenter.default.addObserver(
+                forName: NSWindow.didChangeOcclusionStateNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.sync()
+                }
+            }
+            // Never publish from inside a SwiftUI view update.
+            DispatchQueue.main.async { [weak self] in
+                self?.sync()
+            }
+        }
+
+        private func sync() {
+            guard let window else { return }
+            let visible = window.occlusionState.contains(.visible)
+            if appState.isWindowVisible != visible {
+                appState.isWindowVisible = visible
+            }
+        }
     }
 }

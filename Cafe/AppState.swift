@@ -15,11 +15,13 @@ final class AppState: ObservableObject {
     @Published var totalSeconds: TimeInterval = 0
     @Published var showAdvancedShutdown: Bool = false
     @Published var shutdownWhenDone: Bool = false
+    /// False while the main window is ordered out or fully covered — its animations pause.
+    @Published var isWindowVisible: Bool = true
 
     let engine = CaffeinateEngine()
     private let statusItem = StatusItemController()
     private var tickTimer: AnyCancellable?
-    private var endDate: Date?
+    private(set) var endDate: Date?
     private var isShuttingDown = false
 
     /// Fill level for cup visuals: 1.0 = full.
@@ -156,9 +158,15 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The countdown only changes once per second, so that is all we wake up for.
+    /// Anything that must look smooth (the cup in the window) derives its own
+    /// value from `endDate` per frame instead of being pushed from here.
     private func startTicking() {
         tickTimer?.cancel()
-        tickTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common)
+        tickTimer = nil
+        // An unlimited session has nothing that changes over time.
+        guard !isUnlimited else { return }
+        tickTimer = Timer.publish(every: 1.0, tolerance: 0.1, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 self?.tick()
