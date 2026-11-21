@@ -4,38 +4,66 @@ import QuartzCore
 /// Native menu-bar status item shown only while caffeinate is active.
 ///
 /// Redrawing a status item is expensive: every new image is laid out, rasterised and
-/// shipped to the process that hosts the menu bar. So the icon is only redrawn when
-/// what it shows actually changes, and the idle steam/liquid motion runs at a low
-/// frame rate from a single timer that stops whenever the menu bar is not on screen.
+/// composited by the window server. So the icon is redrawn only when what it shows
+/// changes:
+/// - the cup itself changes only when the fill level moves by one visible step;
+/// - the steam is the only ambient motion. It runs at a modest frame rate, only while
+///   steam is showing and someone can see it (menu bar on screen, displays awake, the
+///   session unlocked), and its frames repeat every cycle, so each one is drawn once
+///   and then reused from a cache.
 @MainActor
-final class StatusItemController: NSObject {
+final class StatusItemController: NSObject, NSMenuDelegate {
     var onStop: (() -> Void)?
+    /// Told when the menu opens or closes, so the countdown only ticks while it is read.
+    var onMenuVisibilityChanged: ((Bool) -> Void)?
 
-    /// Frame rate of the ambient steam/liquid motion. 0 keeps the icon fully static
-    /// between state changes (smoke fades still animate).
-    private static let ambientFramesPerSecond: Double = 10
-    /// Frame rate while the smoke is fading in or out — short-lived, so it can be smooth.
-    private static let transitionFramesPerSecond: Double = 30
     /// Phase advance per second (matches the original 0.08 per frame at 30 fps).
     private static let phaseSpeed: CGFloat = 2.4
+    /// The steam repeats every 2π of phase (≈2.6 s), drawn as this many cached frames per
+    /// cycle: ≈6 fps. Every frame costs ≈9 ms of main-thread time inside AppKit (the
+    /// status item re-renders the button and snapshots it for the menu bar), so this
+    /// count is what the steam costs; the wisps move < 1.5 pt per frame at this pace.
+    private static let steamFramesPerCycle = 16
+    private static let steamFrameInterval: TimeInterval =
+        Double(2 * CGFloat.pi / phaseSpeed) / Double(steamFramesPerCycle)
+    /// Frame rate while the smoke fades in or out — short-lived, so it can be smooth.
+    private static let transitionFramesPerSecond: Double = 30
     /// The cup interior is ~13 pt tall; finer fill steps than this are sub-pixel.
-    private static let fillSteps: Double = 64
+    static let fillSteps: Double = 64
+    private static let iconSize = NSSize(width: 22, height: 22)
 
     private var statusItem: NSStatusItem?
     private let renderer = CupStatusIconRenderer()
     private var menu: NSMenu?
     private var remainingItem: NSMenuItem?
+    private var remainingTitle = "Remaining: —"
     private var animationTimer: Timer?
     private var animationInterval: TimeInterval?
     private var lastFrameTime: CFTimeInterval = 0
     private var occlusionObserver: NSObjectProtocol?
+
+    private var steamFrame = 0
     private var phase: CGFloat = 0
     private var currentFill: Double = 1
-    private var drawnFillStep: Int = -1
     private var showSmoke: Bool = true
-
     /// Smoothly interpolated 0…1 value that drives both the smoke fade and the cup scale.
     private var smokeProgress: CGFloat = 0
+
+    /// What the button currently shows; a redraw with the same key is skipped.
+    private var drawnKey: FrameKey?
+    /// Settled frames for the current fill step (the steam-less cup, or one per steam frame).
+    private var frameCache: [FrameKey: NSImage] = [:]
+
+    /// False while every display is asleep, the screen is locked or the user session is
+    /// switched out — nobody can see the menu bar then.
+    private var isScreenAvailable = true
+    private(set) var isMenuOpen = false
+
+    private struct FrameKey: Hashable {
+        var fillStep: Int
+        /// -1 for the steam-less cup.
+        var steamFrame: Int
+    }
 
     func show(fillLevel: Double, showSmoke: Bool, remainingText: String, isUnlimited: Bool) {
         if statusItem == nil {
@@ -61,13 +89,13 @@ final class StatusItemController: NSObject {
         self.showSmoke = showSmoke
         setRemaining(remainingText, isUnlimited: isUnlimited)
 
-        if !isMenuBarVisible {
+        if !canAnimate {
             // Nobody can see a fade right now; land on the final state directly.
             smokeProgress = showSmoke ? 1 : 0
         }
         updateAnimationTimer()
         // While a timer is running the next frame picks the new values up.
-        if animationTimer == nil, fillStep != drawnFillStep {
+        if animationTimer == nil {
             redraw()
         }
     }
@@ -84,8 +112,23 @@ final class StatusItemController: NSObject {
         statusItem = nil
         menu = nil
         remainingItem = nil
+        isMenuOpen = false
         smokeProgress = 0
-        drawnFillStep = -1
+        drawnKey = nil
+        frameCache.removeAll()
+    }
+
+    /// Displays asleep, screen locked, session switched out: stop all motion. Resume,
+    /// with a fresh frame, once the screen is back.
+    func setScreenAvailable(_ available: Bool) {
+        guard available != isScreenAvailable else { return }
+        isScreenAvailable = available
+        if !available {
+            smokeProgress = showSmoke ? 1 : 0
+        } else {
+            redraw()
+        }
+        updateAnimationTimer()
     }
 
     // MARK: - Animation
@@ -105,6 +148,10 @@ final class StatusItemController: NSObject {
         return window.occlusionState.contains(.visible)
     }
 
+    private var canAnimate: Bool {
+        statusItem != nil && isScreenAvailable && isMenuBarVisible
+    }
+
     private func observeVisibility(of item: NSStatusItem) {
         guard let window = item.button?.window else { return }
         occlusionObserver = NotificationCenter.default.addObserver(
@@ -114,6 +161,9 @@ final class StatusItemController: NSObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                if !self.canAnimate {
+                    self.smokeProgress = self.showSmoke ? 1 : 0
+                }
                 if self.isMenuBarVisible {
                     self.redraw()
                 }
@@ -122,14 +172,16 @@ final class StatusItemController: NSObject {
         }
     }
 
-    /// Runs exactly one timer, at the slowest rate that the current state needs — or none.
+    /// Runs exactly one timer, at the slowest rate the current state needs — or none.
+    /// A settled cup without steam needs none: it only changes with the fill level,
+    /// which `update` redraws.
     private func updateAnimationTimer() {
         var interval: TimeInterval?
-        if statusItem != nil, isMenuBarVisible {
+        if canAnimate {
             if isTransitioning {
                 interval = 1.0 / Self.transitionFramesPerSecond
-            } else if Self.ambientFramesPerSecond > 0 {
-                interval = 1.0 / Self.ambientFramesPerSecond
+            } else if showSmoke {
+                interval = Self.steamFrameInterval
             }
         }
         guard interval != animationInterval else { return }
@@ -161,13 +213,33 @@ final class StatusItemController: NSObject {
         let dt = CGFloat(max(0, min(0.25, now - lastFrameTime)))
         lastFrameTime = now
 
-        phase = (phase + Self.phaseSpeed * dt).truncatingRemainder(dividingBy: 2 * .pi)
         let wasTransitioning = isTransitioning
-        advanceSmoke(dt: dt)
+        if wasTransitioning {
+            phase = (phase + Self.phaseSpeed * dt).truncatingRemainder(dividingBy: 2 * .pi)
+            advanceSmoke(dt: dt)
+            if !isTransitioning {
+                snapPhaseToSteamFrame()
+            }
+        } else {
+            // Settled steam: step through the fixed cycle, so every frame is a cache hit
+            // after the first lap.
+            steamFrame = (steamFrame + 1) % Self.steamFramesPerCycle
+            phase = steamPhase(steamFrame)
+        }
         redraw()
         if wasTransitioning != isTransitioning {
             updateAnimationTimer()
         }
+    }
+
+    private func steamPhase(_ frame: Int) -> CGFloat {
+        CGFloat(frame) * 2 * .pi / CGFloat(Self.steamFramesPerCycle)
+    }
+
+    private func snapPhaseToSteamFrame() {
+        let step = 2 * CGFloat.pi / CGFloat(Self.steamFramesPerCycle)
+        steamFrame = Int((phase / step).rounded()) % Self.steamFramesPerCycle
+        phase = steamPhase(steamFrame)
     }
 
     /// Eases `smokeProgress` toward its target — snappy but fluid, independent of frame rate.
@@ -184,26 +256,57 @@ final class StatusItemController: NSObject {
 
     private func redraw() {
         guard let button = statusItem?.button else { return }
-        let image = renderer.image(
-            size: NSSize(width: 22, height: 22),
-            fillLevel: currentFill,
+        let step = fillStep
+
+        // Mid-fade frames are one-offs; draw them directly.
+        guard !isTransitioning else {
+            button.image = makeImage(fillStep: step)
+            drawnKey = nil
+            return
+        }
+
+        let key = FrameKey(fillStep: step, steamFrame: smokeProgress > 0 ? steamFrame : -1)
+        guard key != drawnKey else { return }
+        if let drawn = drawnKey, drawn.fillStep != step {
+            // The fill only moves one way; frames for an old level are never shown again.
+            frameCache.removeAll(keepingCapacity: true)
+        }
+        let image: NSImage
+        if let cached = frameCache[key] {
+            image = cached
+        } else {
+            image = makeImage(fillStep: step)
+            frameCache[key] = image
+        }
+        button.image = image
+        drawnKey = key
+    }
+
+    /// The image keeps its drawing handler, so AppKit still renders it for the menu
+    /// bar's current appearance and scale; reusing the instance reuses that rendering.
+    private func makeImage(fillStep: Int) -> NSImage {
+        renderer.image(
+            size: Self.iconSize,
+            fillLevel: Double(fillStep) / Self.fillSteps,
             smokeProgress: smokeProgress,
             phase: phase
         )
-        button.image = image
-        drawnFillStep = fillStep
     }
 
+    // MARK: - Menu
+
     private func setRemaining(_ remainingText: String, isUnlimited: Bool) {
-        let title = isUnlimited ? "Remaining: Unlimited" : "Remaining: \(remainingText)"
-        if remainingItem?.title != title {
-            remainingItem?.title = title
+        remainingTitle = isUnlimited ? "Remaining: Unlimited" : "Remaining: \(remainingText)"
+        // The title only matters while the menu is open; it is refreshed when it opens.
+        if isMenuOpen, remainingItem?.title != remainingTitle {
+            remainingItem?.title = remainingTitle
         }
     }
 
     private func buildMenu() {
         let menu = NSMenu()
-        let remaining = NSMenuItem(title: "Remaining: —", action: nil, keyEquivalent: "")
+        menu.delegate = self
+        let remaining = NSMenuItem(title: remainingTitle, action: nil, keyEquivalent: "")
         remaining.isEnabled = false
         remainingItem = remaining
         menu.addItem(remaining)
@@ -215,6 +318,21 @@ final class StatusItemController: NSObject {
         menu.addItem(stop)
 
         self.menu = menu
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        isMenuOpen = true
+        // Lets the owner refresh the countdown right away and tick every second.
+        onMenuVisibilityChanged?(true)
+        if remainingItem?.title != remainingTitle {
+            remainingItem?.title = remainingTitle
+        }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard isMenuOpen else { return }
+        isMenuOpen = false
+        onMenuVisibilityChanged?(false)
     }
 
     @objc private func stopAction() {

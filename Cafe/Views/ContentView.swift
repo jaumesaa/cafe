@@ -37,10 +37,23 @@ struct ContentView: View {
             AboutSheetView()
         }
         .animation(.spring(duration: 0.42, bounce: 0.12), value: appState.isActive)
+        .transaction { transaction in
+            // Nothing animates in a window nobody can see. An animation started while
+            // the window is ordered out (the steam stopping at 75%, a countdown change)
+            // never gets a frame to finish on, and keeps re-rendering the cup's blurs.
+            if !isOnScreen {
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .cafeOpenMainWindow)) { _ in
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    private var isOnScreen: Bool {
+        appState.isWindowVisible && appState.isScreenAvailable
     }
 }
 
@@ -55,7 +68,7 @@ private struct SetupSessionView: View {
                 fill: CGFloat(appState.fillLevel),
                 smoke: appState.shouldShowSmoke,
                 active: false,
-                paused: !appState.isWindowVisible
+                paused: !appState.isWindowVisible || !appState.isScreenAvailable
             )
             .frame(height: 268)
             .padding(.top, 12)
@@ -101,16 +114,18 @@ private struct ActiveSessionView: View {
             Spacer(minLength: 28)
 
             CoffeeCupView(
-                fill: CGFloat(appState.fillLevel),
+                // A timed cup derives its level from `sessionEnd` per frame; passing the
+                // per-second fill too would re-render it (blurs included) on every tick,
+                // even while the window is ordered out.
+                fill: appState.endDate == nil ? CGFloat(appState.fillLevel) : 1,
                 smoke: appState.shouldShowSmoke,
                 active: true,
                 sessionEnd: appState.endDate,
                 sessionLength: appState.totalSeconds,
-                paused: !appState.isWindowVisible
+                paused: !appState.isWindowVisible || !appState.isScreenAvailable
             )
             .frame(height: 300)
             .animation(.easeInOut(duration: 0.8), value: appState.shouldShowSmoke)
-            .animation(.easeInOut(duration: 0.35), value: appState.fillLevel)
 
             VStack(spacing: 10) {
                 Text("AWAKE")

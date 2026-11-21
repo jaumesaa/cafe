@@ -16,11 +16,25 @@ final class AppState: ObservableObject {
     @Published var showAdvancedShutdown: Bool = false
     @Published var shutdownWhenDone: Bool = false
     /// False while the main window is ordered out or fully covered — its animations pause.
-    @Published var isWindowVisible: Bool = true
+    @Published var isWindowVisible: Bool = true {
+        didSet {
+            guard isWindowVisible != oldValue else { return }
+            // Coming back on screen: show the current countdown right away.
+            if isWindowVisible {
+                tick()
+            } else {
+                scheduleTick()
+            }
+        }
+    }
+    /// False while the displays sleep, the screen is locked or the session is switched
+    /// out — every animation pauses.
+    @Published private(set) var isScreenAvailable: Bool = true
 
     let engine = CaffeinateEngine()
     private let statusItem = StatusItemController()
-    private var tickTimer: AnyCancellable?
+    private let screenActivity = ScreenActivityMonitor()
+    private var tickTimer: Timer?
     private(set) var endDate: Date?
     private var isShuttingDown = false
 
@@ -58,9 +72,28 @@ final class AppState: ObservableObject {
         statusItem.onStop = { [weak self] in
             self?.stop()
         }
+        statusItem.onMenuVisibilityChanged = { [weak self] isOpen in
+            guard let self else { return }
+            // Opening the menu shows the countdown: refresh it now, then every second.
+            if isOpen {
+                self.tick()
+            } else {
+                self.scheduleTick()
+            }
+        }
         engine.onProcessEnded = { [weak self] in
             Task { @MainActor in
                 self?.handleEngineEnded()
+            }
+        }
+        screenActivity.onChange = { [weak self] available in
+            guard let self else { return }
+            self.isScreenAvailable = available
+            self.statusItem.setScreenAvailable(available)
+            if available {
+                self.tick()
+            } else {
+                self.scheduleTick()
             }
         }
     }
@@ -91,7 +124,7 @@ final class AppState: ObservableObject {
             remainingText: statusRemainingText(),
             isUnlimited: isUnlimited
         )
-        startTicking()
+        scheduleTick()
         dismissMainWindowToAccessory()
     }
 
@@ -158,19 +191,56 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// The countdown only changes once per second, so that is all we wake up for.
-    /// Anything that must look smooth (the cup in the window) derives its own
-    /// value from `endDate` per frame instead of being pushed from here.
-    private func startTicking() {
-        tickTimer?.cancel()
+    /// Someone can read the countdown: the window is on screen, or the menu is open.
+    private var isCountdownOnScreen: Bool {
+        (isWindowVisible && isScreenAvailable) || statusItem.isMenuOpen
+    }
+
+    /// One timer at a time, rescheduled after every tick. The countdown text changes
+    /// once per second, so that is the pace while it is on screen. Otherwise only the
+    /// menu-bar cup is visible, and it changes only when the fill drops by one step or
+    /// the steam stops, so the next wake-up is at that moment (or the end).
+    /// Anything that must look smooth (the cup in the window) derives its own value
+    /// from `endDate` per frame instead of being pushed from here.
+    private func scheduleTick() {
+        tickTimer?.invalidate()
         tickTimer = nil
         // An unlimited session has nothing that changes over time.
-        guard !isUnlimited else { return }
-        tickTimer = Timer.publish(every: 1.0, tolerance: 0.1, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
+        guard isActive, !isUnlimited, let endDate else { return }
+
+        let remaining = endDate.timeIntervalSinceNow
+        let delay: TimeInterval
+        let tolerance: TimeInterval
+        if isCountdownOnScreen {
+            delay = 1
+            tolerance = 0.1
+        } else {
+            // A hair past the boundary, so the new step is already reached when we wake.
+            delay = max(0.5, min(remaining, secondsUntilIconChange(remaining: remaining)) + 0.05)
+            tolerance = min(1, delay * 0.05)
+        }
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
                 self?.tick()
             }
+        }
+        timer.tolerance = tolerance
+        RunLoop.main.add(timer, forMode: .common)
+        tickTimer = timer
+    }
+
+    /// Time until the menu-bar cup looks different: the next fill step, or the steam
+    /// stopping at 75%.
+    private func secondsUntilIconChange(remaining: TimeInterval) -> TimeInterval {
+        guard totalSeconds > 0 else { return remaining }
+        let steps = StatusItemController.fillSteps
+        let step = (max(0, min(1, remaining / totalSeconds)) * steps).rounded()
+        var next = remaining - (step - 0.5) / steps * totalSeconds
+        let smokeEnds = remaining - 0.75 * totalSeconds
+        if smokeEnds > 0 {
+            next = min(next, smokeEnds)
+        }
+        return max(0, next)
     }
 
     private func tick() {
@@ -190,6 +260,7 @@ final class AppState: ObservableObject {
             remainingText: statusRemainingText(),
             isUnlimited: isUnlimited
         )
+        scheduleTick()
     }
 
     private func handleTimedCompletion() {
@@ -218,7 +289,7 @@ final class AppState: ObservableObject {
         remainingSeconds = 0
         totalSeconds = 0
         endDate = nil
-        tickTimer?.cancel()
+        tickTimer?.invalidate()
         tickTimer = nil
         statusItem.hide()
     }
@@ -248,5 +319,50 @@ final class AppState: ObservableObject {
             return String(format: "%d:%02d:%02d", h, m, s)
         }
         return String(format: "%02d:%02d", m, s)
+    }
+}
+
+/// Tells whether anyone can see the screen: every display asleep, the screen locked or
+/// the user session switched out all mean no animation needs to run.
+@MainActor
+final class ScreenActivityMonitor {
+    var onChange: ((Bool) -> Void)?
+
+    private var displaysAsleep = false
+    private var screenLocked = false
+    private var sessionInactive = false
+    private var observers: [(center: NotificationCenter, token: NSObjectProtocol)] = []
+
+    var isAvailable: Bool {
+        !displaysAsleep && !screenLocked && !sessionInactive
+    }
+
+    init() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        observe(workspace, NSWorkspace.screensDidSleepNotification) { $0.displaysAsleep = true }
+        observe(workspace, NSWorkspace.screensDidWakeNotification) { $0.displaysAsleep = false }
+        observe(workspace, NSWorkspace.sessionDidResignActiveNotification) { $0.sessionInactive = true }
+        observe(workspace, NSWorkspace.sessionDidBecomeActiveNotification) { $0.sessionInactive = false }
+        let distributed = DistributedNotificationCenter.default()
+        observe(distributed, Notification.Name("com.apple.screenIsLocked")) { $0.screenLocked = true }
+        observe(distributed, Notification.Name("com.apple.screenIsUnlocked")) { $0.screenLocked = false }
+    }
+
+    private func observe(
+        _ center: NotificationCenter,
+        _ name: Notification.Name,
+        _ apply: @escaping @MainActor @Sendable (ScreenActivityMonitor) -> Void
+    ) {
+        let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let wasAvailable = self.isAvailable
+                apply(self)
+                if self.isAvailable != wasAvailable {
+                    self.onChange?(self.isAvailable)
+                }
+            }
+        }
+        observers.append((center, token))
     }
 }

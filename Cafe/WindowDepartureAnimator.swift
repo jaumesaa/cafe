@@ -3,8 +3,9 @@ import QuartzCore
 
 /// Premium window departure: the setup window shrinks and flies upward
 /// toward the menu-bar cup, then hands off via `completion` for orderOut / accessory policy.
+@MainActor
 enum WindowDepartureAnimator {
-    static func dismiss(_ window: NSWindow, completion: @escaping () -> Void) {
+    static func dismiss(_ window: NSWindow, completion: @escaping @MainActor () -> Void) {
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             completion()
             return
@@ -50,15 +51,18 @@ enum WindowDepartureAnimator {
             window.animator().alphaValue = 0.0
             window.animator().setFrame(targetFrame, display: true)
         }, completionHandler: {
-            // Hand off FIRST, while the window is still invisible (alpha 0).
-            // `completion` orders the window out synchronously, so no restored frame is ever shown.
-            completion()
+            // AppKit calls this on the main thread.
+            MainActor.assumeIsolated {
+                // Hand off FIRST, while the window is still invisible (alpha 0).
+                // `completion` orders the window out synchronously, so no restored frame is ever shown.
+                completion()
 
-            // Only then restore reusable window state, safely off-screen.
-            window.alphaValue = 1.0
-            window.setFrame(startFrame, display: false)
-            window.ignoresMouseEvents = false
-            resetContentLayer(window: window)
+                // Only then restore reusable window state, safely off-screen.
+                window.alphaValue = 1.0
+                window.setFrame(startFrame, display: false)
+                window.ignoresMouseEvents = false
+                resetContentLayer(window: window)
+            }
         })
     }
 
