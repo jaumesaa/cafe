@@ -19,17 +19,17 @@ Requires macOS 26 or later.
 - **Flexible Timer:** Dial in hours and minutes, or leave at 0:00 for an unlimited keep-awake session.
 - **Zero Background Overhead:** Leaves no permanent background daemons or login items; cleanly dismisses when idle or finished.
 - **Universal Binary:** Optimized for both Apple Silicon (M1/M2/M3/M4) and Intel MacBooks.
+- **Light on the battery:** the menu-bar cup only redraws when it changes, and the steam pauses while the display sleeps.
 
 ---
 
 ## 📥 Install
 
-### Option A: From mainlab.es App Store
-Visita [mainlab.es](https://mainlab.es) para recibir el enlace de descarga directa en tu email:
-1. Introduce tu correo en la sección de Apps de [mainlab.es](https://mainlab.es).
-2. Haz clic en el enlace de descarga recibido (`cafe.app.zip`).
-3. Descomprime y arrastra **cafe** a tu carpeta `/Applications`.
-4. En el primer inicio: clic derecho → **Abrir** (Open).
+### Option A: Download
+Cafe comes with every AnyAction license, and is sold on its own at [anyaction.app/cafe](https://anyaction.app/cafe).
+1. Open **Cafe.dmg** (signed and notarized by Apple).
+2. Drag **cafe** to your Applications folder.
+3. Open it from Spotlight.
 
 ### Option B: Build from source
 
@@ -39,6 +39,12 @@ cd Cafe
 chmod +x Scripts/install.sh
 ./Scripts/install.sh
 ```
+
+---
+
+## 📦 Release
+
+`Scripts/release-dmg.sh` builds the signed, notarized **Cafe.dmg** (`--dry-run` to try the layout without notarizing).
 
 ---
 
