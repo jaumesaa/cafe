@@ -9,13 +9,13 @@
 #
 # Needs, once, on this Mac (the same ones AnyAction's scripts/release.sh uses):
 #   - the "Developer ID Application" certificate of team 3KK6H4J24W in the keychain
-#   - a notarytool keychain profile, by default "AnyActionNotary":
-#       xcrun notarytool store-credentials AnyActionNotary --apple-id … --team-id 3KK6H4J24W
+#   - a notarytool keychain profile, by default "MainLabNotary":
+#       xcrun notarytool store-credentials MainLabNotary --apple-id … --team-id 3KK6H4J24W
 # The first run with the layout asks once to let Terminal control Finder: allow it.
 set -euo pipefail
 
 team="3KK6H4J24W"
-notary_profile="${CAFE_NOTARY_PROFILE:-AnyActionNotary}"
+notary_profile="${CAFE_NOTARY_PROFILE:-MainLabNotary}"
 dry_run=false
 layout=true
 for arg in "$@"; do
